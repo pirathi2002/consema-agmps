@@ -18,30 +18,90 @@ from example_data.oasis import OASISDataset
 REPO_URL_WBC = "https://github.com/zxaoyou/segmentation_WBC.git"
 
 
+def npz_memmap(npz_path, key):
+    """Memory-map one array of an .npz straight from disk (no RAM copy).
+
+    Works when the member is stored uncompressed (np.savez, as for
+    polyps-pranet.npz); otherwise falls back to a normal np.load.
+    """
+    import struct
+    import zipfile
+    from numpy.lib import format as npf
+
+    with zipfile.ZipFile(npz_path) as zf:
+        info = zf.getinfo(f"{key}.npy")
+    if info.compress_type != zipfile.ZIP_STORED:
+        return np.load(npz_path)[key]
+    with open(npz_path, "rb") as fh:
+        fh.seek(info.header_offset)
+        name_len, extra_len = struct.unpack("<HH", fh.read(30)[26:30])
+        fh.seek(info.header_offset + 30 + name_len + extra_len)
+        version = npf.read_magic(fh)
+        read_header = (
+            npf.read_array_header_1_0 if version == (1, 0) else npf.read_array_header_2_0
+        )
+        shape, fortran, dtype = read_header(fh)
+        offset = fh.tell()
+    return np.memmap(
+        npz_path, dtype=dtype, mode="r", shape=shape,
+        order="F" if fortran else "C", offset=offset,
+    )
+
+
 # Load the raw data once and reuse it
 def load_polyps_data():
     load_dotenv()
     POLYPS_NPZ = os.getenv("POLYPS_NPZ")
-    data = np.load(f"{POLYPS_NPZ}/polyps-pranet.npz")
-    sgmd = data["sgmd"]  # sigmoid scores
-    gt_masks = data["targets"]
-    test_calib_idxs = [elem.item() for elem in data["example_indexes"]]
+    npz_path = f"{POLYPS_NPZ}/polyps-pranet.npz"
+    test_calib_idxs = [elem.item() for elem in np.load(npz_path)["example_indexes"]]
 
-    # Rescale sigmoid scores to [0, 1] for each image
-    sgmd_rescaled = np.array(
-        [(img - img.min()) / (img.max() - img.min()) for img in sgmd]
-    )
-    sgmd = sgmd_rescaled
+    # MEMORY FIX (results unchanged): sgmd/targets are 1798 x 352 x 352 float64
+    # (1.8 GB each) but only the 500 `example_indexes` rows are ever used. They
+    # are memory-mapped from disk and only those rows are copied into RAM;
+    # _PolypsRows keeps the original indexing (sgmd[list_of_original_idxs]).
+    # Values and dtypes are identical to the original code. ~0.5 GB RAM instead
+    # of ~6.4 GB peak (which froze the laptop and got OOM-killed).
+    raw = npz_memmap(npz_path, "sgmd")  # sigmoid scores
+    sgmd_rows = []
+    for i in test_calib_idxs:
+        img = np.asarray(raw[i])
+        # Rescale sigmoid scores to [0, 1] for each image (as in the original)
+        sgmd_rows.append((img - img.min()) / (img.max() - img.min()))
+    raw = npz_memmap(npz_path, "targets")
+    gt_rows = [np.array(raw[i]) for i in test_calib_idxs]
+    del raw, img
 
+    sgmd = _PolypsRows(test_calib_idxs, np.stack(sgmd_rows))
+    gt_masks = _PolypsRows(test_calib_idxs, np.stack(gt_rows))
     return sgmd, gt_masks, test_calib_idxs, POLYPS_NPZ
 
 
-# DANGER ZONE: this function is called only once to load the data, hence it is a global variable
-# Call this function once to load the data
-sgmd, gt_masks, test_calib_idxs, POLYPS_NPZ = load_polyps_data()
+class _PolypsRows:
+    """Only the used rows of a (1798, H, W) array, indexed by original row ids."""
+
+    def __init__(self, row_ids, rows):
+        self._pos = {int(r): k for k, r in enumerate(row_ids)}
+        self._rows = rows
+
+    def __getitem__(self, idxs):
+        return self._rows[[self._pos[int(i)] for i in idxs]]
+
+
+# DANGER ZONE: the data is loaded once (lazily, on the first setup_polyps call,
+# not at import time) and cached. test_calib_idxs is shuffled in place by every
+# setup_polyps call, exactly as with the original module-level global.
+_POLYPS_CACHE = None
+
+
+def get_polyps_data():
+    global _POLYPS_CACHE
+    if _POLYPS_CACHE is None:
+        _POLYPS_CACHE = load_polyps_data()
+    return _POLYPS_CACHE
 
 
 def setup_polyps(random_seed: int, cal_test_ratio: float):
+    sgmd, gt_masks, test_calib_idxs, POLYPS_NPZ = get_polyps_data()
     np.random.seed(random_seed)
     np.random.shuffle(test_calib_idxs)
 
@@ -53,8 +113,6 @@ def setup_polyps(random_seed: int, cal_test_ratio: float):
         set(test_idxs)
     ), "calib and test sets are not disjoint"
 
-    from skimage.transform import resize
-
     calib_pred_arrays = sgmd[calib_idxs]
     calib_gt_arrays = gt_masks[calib_idxs]
     calib_input_img_paths = [
@@ -63,15 +121,6 @@ def setup_polyps(random_seed: int, cal_test_ratio: float):
     ]
     calib_images = [plt.imread(img_path_) for img_path_ in calib_input_img_paths]
 
-    calib_preds_resized = [
-        resize(pred, (img.shape[0], img.shape[1]), anti_aliasing=False)
-        for pred, img in zip(calib_pred_arrays, calib_images)
-    ]
-    calib_gt_resized = [
-        resize(gt, (img.shape[0], img.shape[1]), anti_aliasing=False)
-        for gt, img in zip(calib_gt_arrays, calib_images)
-    ]
-
     test_pred_arrays = sgmd[test_idxs]
     test_gt_arrays = gt_masks[test_idxs]
     test_input_img_paths = [
@@ -79,25 +128,16 @@ def setup_polyps(random_seed: int, cal_test_ratio: float):
     ]
     test_images = [plt.imread(img_path_) for img_path_ in test_input_img_paths]
 
-    test_preds_resized = [
-        resize(pred, (img.shape[0], img.shape[1]), anti_aliasing=False)
-        for pred, img in zip(test_pred_arrays, test_images)
-    ]
-    test_gt_resized = [
-        resize(gt, (img.shape[0], img.shape[1]), anti_aliasing=False)
-        for gt, img in zip(test_gt_arrays, test_images)
-    ]
+    # MEMORY FIX (results unchanged): the original code also built
+    # {calib,test}_{preds,gt}_resized (every map upsampled to full JPEG size as
+    # float64, ~3+ GB) but never returned or used them, so they were removed.
 
     # add a dummy dimension for batch size (== 1)
     calib_pred_arrays = [np.expand_dims(pred, 0) for pred in calib_pred_arrays]
     calib_gt_arrays = [np.expand_dims(gt, 0) for gt in calib_gt_arrays]
-    calib_preds_resized = [np.expand_dims(pred, 0) for pred in calib_preds_resized]
-    calib_gt_resized = [np.expand_dims(gt, 0) for gt in calib_gt_resized]
     calib_images = [np.expand_dims(img, 0) for img in calib_images]
     test_pred_arrays = [np.expand_dims(pred, 0) for pred in test_pred_arrays]
     test_gt_arrays = [np.expand_dims(gt, 0) for gt in test_gt_arrays]
-    test_preds_resized = [np.expand_dims(pred, 0) for pred in test_preds_resized]
-    test_gt_resized = [np.expand_dims(gt, 0) for gt in test_gt_resized]
     test_images = [np.expand_dims(img, 0) for img in test_images]
 
     return (

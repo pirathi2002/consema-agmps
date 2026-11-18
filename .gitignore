@@ -19,3 +19,10 @@ __pycache__/
 ## figures
 *.png
 *.gif
+# --- AG-MPS extension ---
+.venv*/
+# 145 MB > GitHub's 100 MB limit; rebuild with experiments/extension/make_demo_bundle.py
+demo/polyps.npz
+results/extension/log_*.txt
+# keep result figures (*.png is ignored above)
+!figures/extension/*.png
