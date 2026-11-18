@@ -1,3 +1,67 @@
+# AG-MPS: Adaptive Geodesic Morphological Prediction Sets
+
+**Course project:** reproduction and extension of *Mossina & Friedrich, "Conformal Prediction for
+Image Segmentation Using Morphological Prediction Sets", MICCAI 2025*
+([paper code](https://github.com/deel-ai-papers/consema), MIT license; their original README is below).
+
+➡️ **Full write-up, method, code map and all results: [EXTENSION.md](EXTENSION.md)**
+
+## What I added
+
+The paper adds a conformal margin around a predicted mask by dilating it λ̂ times with a fixed 3×3
+cross. That margin is the same thickness in every direction and the same size for every image.
+My extension keeps the paper's guarantee P(coverage ≥ τ) ≥ 1−α and makes the margin adapt:
+
+| | Idea | Paper limitation it addresses |
+|---|---|---|
+| **E1 – geodesic margins** | λ dilations by the cross = {taxicab distance to Ŷ ≤ λ}. I replace that with a *geodesic* distance with pixel costs `1 + β·h(p)`, where h comes from the image (black-box) or the sigmoid (gray-box). The margin grows inside object-like regions and stops at boundaries. | isotropic margin floods into background |
+| **E2 – size-adaptive scores** | score ÷ (1 + equivalent radius of Ŷ)^γ, so margins are proportional to object size | one margin for all images (Sec. 5 "Perspectives") |
+| **E3 – exact quantile** | the official code takes the next order statistic (off by one) | slightly over-conservative sets |
+
+β = γ = 0 gives exactly the paper's method (unit tests check this). β, γ and h are chosen on a separate
+tuning set, never on calibration data.
+
+## Results (36 random seeds, 1−α = 0.95, τ = 0.99)
+
+Stretch = |prediction set| / |predicted mask| (lower is better). Coverage is ≥ 1−α up to sampling error for every method.
+
+| Dataset (model) | Paper stretch | AG-MPS stretch | Change | Coverage paper → AG-MPS |
+|---|---|---|---|---|
+| WBC (UniverSeg) | 1.906 | **1.311** (black-box) | **−29.5 %** | 0.962 → 0.963 |
+| OASIS (UniverSeg) | 2.213 | **1.547** (black-box) | **−30.1 %** | 0.969 → 0.954 |
+| Polyps (PraNet) | 3.602 | **2.562** (E2, black-box) / **2.132** (gray-box) | **−25.7 % / −38.0 %** | 0.945 → 0.945 / 0.946 |
+
+**Reproduction of the paper's Table 1:** WBC identical to 3 decimals, OASIS within 0.005,
+Polyps within one standard deviation ([table](results/extension/table_reproduction.csv)).
+
+| WBC: paper margin vs AG-MPS | Polyps: paper margin vs AG-MPS |
+|---|---|
+| ![wbc](figures/extension/qualitative_wbc_blackbox.png) | ![polyps](figures/extension/qualitative_polyps_graybox.png) |
+
+More figures: [figures/extension/](figures/extension/) · tables: [results/extension/summary.md](results/extension/summary.md)
+
+## Run it
+
+```bash
+# results viewer: 36-seed tables + figures + live explorer (paper vs AG-MPS on any test image)
+python app/app.py                      # -> http://127.0.0.1:7860
+python -m pytest tests -q              # equivalence with the paper + coverage validity
+```
+
+Full pipeline (data → UniverSeg predictions → experiments → figures): [EXTENSION.md §4](EXTENSION.md#4-reproducing).
+No local GPU: [notebooks/consema_extension_colab.ipynb](notebooks/consema_extension_colab.ipynb).
+
+| Where | What |
+|---|---|
+| [`src/consema/extension/`](src/consema/extension/) | the method (distances.py: E1, cp.py: scores, E2, E3) |
+| [`experiments/extension/`](experiments/extension/) | prediction caching, 36-seed experiments, analysis, figures, demo data |
+| [`app/app.py`](app/app.py) | Gradio results viewer |
+| [`tests/test_extension.py`](tests/test_extension.py) | 68 tests |
+
+---
+
+# Original README (Mossina & Friedrich)
+
 # Conformal Prediction for Image Segmentation Using Morphological Prediction Sets
 
 [![arXiv](https://img.shields.io/badge/arXiv-2503.05618-b31b1b.svg)](https://arxiv.org/abs/2503.05618)
