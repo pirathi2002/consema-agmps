@@ -26,3 +26,4 @@ demo/polyps.npz
 results/extension/log_*.txt
 # keep result figures (*.png is ignored above)
 !figures/extension/*.png
+app/*.pyi
